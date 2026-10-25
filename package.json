@@ -1,0 +1,10 @@
+{
+  "name": "geotag-irl",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Real-life GPS tag / manhunt PWA",
+  "scripts": {
+    "start": "npx serve .",
+    "deploy": "bash deploy.sh"
+  }
+}

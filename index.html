@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>GeoTag IRL</title>
+<meta name="description" content="Real-life GPS tag and manhunt game. Free, installable, no server.">
+<meta name="theme-color" content="#0b0f14">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="GeoTag IRL">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" href="icons/icon-192.png">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body data-view="home">
+
+<div id="map"></div>
+
+<!-- ============ HOME ============ -->
+<section id="home" class="screen">
+  <div class="home-card">
+    <img src="icons/icon-192.png" class="logo" alt="" width="84" height="84">
+    <h1>GeoTag IRL</h1>
+    <p class="sub">Tag and manhunt on a real map. Runners hide, hunters chase, and the play area shrinks.</p>
+
+    <button id="btnHost" class="btn primary big" type="button">Host a match</button>
+    <button id="btnJoinShow" class="btn big" type="button">Join a match</button>
+
+    <form id="joinForm" class="hidden" autocomplete="off">
+      <input id="inName" maxlength="16" placeholder="Your name" required>
+      <input id="inCode" maxlength="4" placeholder="Room code" autocapitalize="characters" autocomplete="off" spellcheck="false" required class="mono">
+      <div class="seg" role="radiogroup" aria-label="Role">
+        <label><input type="radio" name="role" value="runner" checked><span>Runner</span></label>
+        <label><input type="radio" name="role" value="hunter"><span>Hunter</span></label>
+      </div>
+      <button class="btn primary big" id="btnJoin" type="submit">Join match</button>
+    </form>
+
+    <p id="homeErr" class="err" role="alert"></p>
+    <button id="btnInstall" class="btn hidden" type="button">Install app</button>
+    <p id="iosHint" class="fine hidden">On iPhone: tap Share, then Add to Home Screen.</p>
+    <p class="fine">Keep the app open with the screen on while you play. It needs location permission.</p>
+  </div>
+</section>
+
+<!-- ============ GAME (host + player) ============ -->
+<section id="game" class="screen">
+  <header id="hud">
+    <div class="hud-l">
+      <span id="hudRole" class="pill"></span>
+      <span id="hudRoom" class="pill mono"></span>
+    </div>
+    <div class="hud-c">
+      <div id="hudTimer" class="timer mono">--:--</div>
+      <div id="hudSub" class="hudsub"></div>
+    </div>
+    <div class="hud-r">
+      <span id="hudConn" class="cdot" title="Connection"></span>
+      <button id="btnWake" class="icon-btn" type="button" title="Keep screen awake" aria-label="Keep screen awake">Awake</button>
+      <button id="btnLoc" class="icon-btn" type="button" title="Centre map" aria-label="Centre map">Locate</button>
+      <button id="btnExit" class="icon-btn" type="button" title="Leave" aria-label="Leave">Exit</button>
+    </div>
+  </header>
+
+  <div id="banner" class="banner hidden" role="status"></div>
+  <div id="oob" class="oob hidden" role="alert"><strong>OUT OF BOUNDS</strong><span>Get back inside the zone</span></div>
+
+  <div id="sheet" class="sheet">
+    <button id="sheetHandle" class="handle" type="button" aria-label="Show or hide panel"></button>
+    <nav id="tabs">
+      <button type="button" data-tab="setup" class="only-host">Setup</button>
+      <button type="button" data-tab="players" class="only-host">Players</button>
+      <button type="button" data-tab="catch" class="only-play">Catch</button>
+      <button type="button" data-tab="team" class="only-play">Team</button>
+      <button type="button" data-tab="chat">Chat<em id="chatBadge" class="badge hidden">0</em></button>
+    </nav>
+
+    <div class="panels">
+      <!-- host: setup -->
+      <div id="p-setup" class="panel only-host">
+        <div class="row between">
+          <div>
+            <div class="lbl">Room code</div>
+            <div id="roomBig" class="roomBig mono">....</div>
+          </div>
+          <button id="btnShare" class="btn" type="button">Share invite link</button>
+        </div>
+
+        <div class="lbl">Play area (tap the map to draw)</div>
+        <div class="seg2">
+          <button id="dmCircle" type="button" class="on">Circle</button>
+          <button id="dmPoly" type="button">Polygon</button>
+        </div>
+        <div id="circCtl" class="row">
+          <input id="rad" type="range" min="100" max="5000" step="50" value="500" aria-label="Radius">
+          <span id="radVal" class="mono">500 m</span>
+        </div>
+        <div id="polyCtl" class="row hidden">
+          <button id="polyUndo" class="btn sm" type="button">Undo point</button>
+          <button id="polyClear" class="btn sm" type="button">Clear</button>
+          <span id="polyInfo" class="mut"></span>
+        </div>
+
+        <div class="grid">
+          <label>Match length (min)
+            <input id="inDur" type="number" min="1" max="480" value="30" inputmode="numeric">
+          </label>
+          <label>Hunters see runners
+            <select id="inInt">
+              <option value="0">Real-time</option>
+              <option value="60">Every 1 min</option>
+              <option value="120">Every 2 min</option>
+              <option value="300">Every 5 min</option>
+            </select>
+          </label>
+          <label>Catch range
+            <select id="inCatchR">
+              <option value="0">No distance check</option>
+              <option value="30">30 m</option>
+              <option value="50" selected>50 m</option>
+              <option value="100">100 m</option>
+            </select>
+          </label>
+          <label class="chk"><input id="inStorm" type="checkbox" checked> Shrinking storm zone</label>
+          <label class="wide">Storm final size <span id="stormVal" class="mono">30%</span>
+            <input id="inStormMin" type="range" min="10" max="90" step="5" value="30">
+          </label>
+        </div>
+
+        <div class="row">
+          <button id="btnStart" class="btn primary grow" type="button">Start match</button>
+          <button id="btnEnd" class="btn danger grow hidden" type="button">End match</button>
+          <button id="btnNew" class="btn grow hidden" type="button">New round</button>
+        </div>
+      </div>
+
+      <!-- host: players -->
+      <div id="p-players" class="panel only-host hidden">
+        <div id="plist" class="list"></div>
+      </div>
+
+      <!-- player: catch -->
+      <div id="p-catch" class="panel only-play hidden">
+        <div class="only-runner">
+          <div class="lbl">Your catch code. Show it only to a hunter who actually tagged you.</div>
+          <div id="codeVal" class="code mono">------</div>
+          <div class="bar"><i id="codeBar"></i></div>
+          <div id="codeNote" class="mut"></div>
+        </div>
+        <div class="only-hunter">
+          <div class="lbl">Tagged a runner? Enter the code on their screen.</div>
+          <div class="row">
+            <input id="inCatch" class="mono big-in" inputmode="numeric" pattern="[0-9]*" maxlength="6" placeholder="6-digit code" autocomplete="off">
+            <button id="btnCatch" class="btn primary" type="button">Register catch</button>
+          </div>
+          <div id="catchMsg" class="mut"></div>
+        </div>
+      </div>
+
+      <!-- player: team -->
+      <div id="p-team" class="panel only-play hidden">
+        <div id="tcounts" class="lbl"></div>
+        <div id="tlist" class="list"></div>
+      </div>
+
+      <!-- chat (everyone) -->
+      <div id="p-chat" class="panel hidden">
+        <div id="chatLog" class="chatlog"></div>
+        <form id="chatForm" class="row" autocomplete="off">
+          <select id="chatTarget" class="only-host" aria-label="Send to">
+            <option value="all">Everyone</option>
+            <option value="runner">Runners</option>
+            <option value="hunter">Hunters</option>
+          </select>
+          <input id="chatInput" maxlength="200" placeholder="Message your team" class="grow">
+          <button class="btn primary" type="submit">Send</button>
+        </form>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div id="endOverlay" class="overlay hidden">
+  <div class="card">
+    <h2 id="endTitle"></h2>
+    <p id="endSub"></p>
+    <button id="endClose" class="btn primary big" type="button">OK</button>
+  </div>
+</div>
+<div id="toast" class="toast hidden" role="status"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.2/peerjs.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
