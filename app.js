@@ -23,6 +23,9 @@ const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const el = (tag, cls) => { const e = document.createElement(tag); if (cls) e.className = cls; return e; };
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const HOSTPID = 'HOST';                                   // id of the host's own player entry (when the host also plays)
+const isPlayer = () => S.mode === 'play' || (S.mode === 'host' && S.hostPlays);
+const adminView = () => S.mode === 'host' && !S.hostPlays; // observer: sees everyone live
 
 function rid(n) {
   const a = new Uint8Array(n); crypto.getRandomValues(a);
@@ -96,7 +99,7 @@ const S = {
   endAt: 0, durMs: 0, winner: null,
   peer: null,
   // host
-  players: new Map(), banned: new Set(), drawMode: 'circle', poly: [], circ: { center: null, radius: 500 }, lastSync: 0,
+  hostPlays: false, players: new Map(), banned: new Set(), drawMode: 'circle', poly: [], circ: { center: null, radius: 500 }, lastSync: 0,
   // player
   conn: null, joined: false, me: { id: null, status: 'alive' }, pos: null, lastSent: 0, watchId: null, out: false,
   others: new Map(), team: [], counts: { runnersAlive: 0, hunters: 0 }, code: null, codeEnd: 0, rt: null, fitted: false
@@ -194,16 +197,21 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
 
 /* ============================== UI plumbing ============================== */
 let activeTab = null, unread = 0;
-function setView(v) {
-  document.body.dataset.view = v;
-  document.body.classList.toggle('is-runner', v === 'play' && S.role === 'runner');
-  document.body.classList.toggle('is-hunter', v === 'play' && S.role === 'hunter');
+function refreshBody() {
+  const home = !S.mode || (S.mode === 'play' && !S.joined);
+  const host = S.mode === 'host', player = !home && isPlayer(), c = document.body.classList;
+  document.body.dataset.view = home ? 'home' : 'game';
+  c.toggle('is-host', host); c.toggle('is-player', player); c.toggle('is-observer', host && !S.hostPlays);
+  c.toggle('is-runner', player && S.role === 'runner'); c.toggle('is-hunter', player && S.role === 'hunter');
+  c.toggle('no-role', player && !S.role);
 }
 function applyRole() {
-  setView(S.mode === 'host' ? 'host' : 'play');
+  refreshBody();
   const p = $('#hudRole');
-  if (S.mode === 'host') { p.textContent = 'Host'; p.className = 'pill host'; }
-  else { p.textContent = S.role === 'hunter' ? 'Hunter' : 'Runner'; p.className = 'pill ' + S.role; }
+  if (adminView()) { p.textContent = 'Host'; p.className = 'pill host'; return; }
+  const r = S.role ? (S.role === 'hunter' ? 'Hunter' : 'Runner') : 'Waiting for role';
+  p.textContent = S.mode === 'host' ? 'Host (' + r + ')' : r;
+  p.className = 'pill ' + (S.role || 'host');
 }
 function setTab(name) {
   activeTab = name;
@@ -228,7 +236,8 @@ function addChat(m) {
   log.scrollTop = log.scrollHeight;
   if (activeTab !== 'chat' && m.team !== 'sys') { unread++; updBadge(); }
 }
-function sysChat(text) { addChat({ team: 'sys', from: '*', text }); }
+function sysChat(text) { if (S.hostPlays && S.phase === 'running') return; addChat({ team: 'sys', from: '*', text }); }
+function hostShowChat(m) { if (!S.hostPlays || m.team === 'all' || m.team === S.role) addChat(m); }
 
 function showEnd() {
   const w = S.winner;
@@ -295,7 +304,7 @@ function pushRoster() {
   const runnersAlive = [...S.players.values()].filter(p => p.role === 'runner' && p.status === 'alive').length;
   const hunters = [...S.players.values()].filter(p => p.role === 'hunter').length;
   for (const p of S.players.values()) {
-    const team = [...S.players.values()].filter(q => q.role === p.role)
+    const team = [...S.players.values()].filter(q => p.role && q.role === p.role)
       .map(q => ({ id: q.id, name: q.name, role: q.role, connected: q.connected, status: q.status }));
     tx(p.conn, { t: 'roster', team, runnersAlive, hunters });
   }
@@ -313,11 +322,10 @@ function hostMsg(c, m) {
     const name = String(m.name || 'Player').replace(/[<>]/g, '').trim().slice(0, 16) || 'Player';
     let p = S.players.get(pid);
     if (!p) {
-      const role = m.role === 'hunter' ? 'hunter' : 'runner';
-      p = { id: pid, name, role, baseRole: role, status: 'alive', conn: c, connected: true, pos: null, out: false,
+      p = { id: pid, name, role: null, baseRole: null, status: 'alive', conn: c, connected: true, pos: null, out: false,
             code: null, prev: null, codeAt: 0, seen: {}, fails: 0, lock: 0 };
       S.players.set(pid, p);
-      sysChat(name + ' joined as ' + role);
+      sysChat(name + ' joined - give them a role in the Players tab');
     } else { p.conn = c; p.connected = true; p.name = name; sysChat(name + ' reconnected'); }
     tx(c, { t: 'welcome', id: pid, role: p.role, status: p.status, cfg: S.cfg, st: stState() });
     if (p.role === 'runner' && p.status === 'alive' && S.phase === 'running') {
@@ -335,14 +343,15 @@ function hostMsg(c, m) {
       p.pos = { lat, lng, acc: clamp(+m.acc || 0, 0, 9999), ts: Date.now() - clamp(+m.age || 0, 0, 600000) };
       const was = p.out;
       p.out = !!(S.cfg.boundary && S.phase === 'running' && !inside(scaled(S.cfg.boundary, stormF()), lat, lng));
-      if (p.out && !was) { sysChat(p.name + ' is OUT OF BOUNDS'); toast(p.name + ' is out of bounds', 3000); }
+      if (p.out && !was && adminView()) { sysChat(p.name + ' is OUT OF BOUNDS'); toast(p.name + ' is out of bounds', 3000); }
       relayPos(p); renderHostMarkers();
       break;
     }
     case 'chat': {
       const text = String(m.text || '').slice(0, 200).trim(); if (!text) return;
+      if (!p.role) return;
       const msg = { t: 'chat', from: p.name, team: p.role, text, ts: Date.now() };
-      broadcast(msg, q => q.role === p.role); addChat(msg);
+      broadcast(msg, q => q.role === p.role && !q.local); hostShowChat(msg);
       break;
     }
     case 'catch': hostCatch(p, String(m.code || '').replace(/\D/g, '')); break;
@@ -350,11 +359,11 @@ function hostMsg(c, m) {
 }
 
 function relayPos(p) {
-  if (!p.pos) return;
+  if (!p.pos || !p.role) return;
   const item = { id: p.id, name: p.name, role: p.role, lat: p.pos.lat, lng: p.pos.lng, acc: p.pos.acc, ts: p.pos.ts };
   const now = Date.now(), gap = S.cfg.intervalSec * 1000;
   for (const q of S.players.values()) {
-    if (q.id === p.id || !q.connected) continue;
+    if (q.id === p.id || !q.connected || !q.role) continue;
     if (q.role === p.role) tx(q.conn, { t: 'pos', p: item });                       // teammates: always live
     else if (p.role === 'runner' && q.role === 'hunter' && S.phase === 'running') { // hunters see runners per ping interval
       if (!gap || now - (q.seen[p.id] || 0) >= gap) { q.seen[p.id] = now; tx(q.conn, { t: 'pos', p: Object.assign({ reveal: true }, item) }); }
@@ -388,11 +397,11 @@ function hostCatch(h, code) {
 }
 function announce(text) {
   const msg = { t: 'chat', from: 'HOST', team: 'all', text, ts: Date.now() };
-  broadcast(msg); addChat(msg);
+  broadcast(msg, q => !q.local); addChat(msg);
 }
 function sendHostChat(text, target) {
   const msg = { t: 'chat', from: 'HOST', team: target, text, ts: Date.now() };
-  broadcast(msg, q => target === 'all' || q.role === target); addChat(msg);
+  broadcast(msg, q => !q.local && (target === 'all' || q.role === target)); addChat(msg);
 }
 
 function endGame(winner) {
@@ -404,10 +413,11 @@ function endGame(winner) {
 function startMatch() {
   if (!S.cfg.boundary) return toast('Draw a play area first.');
   const live = [...S.players.values()].filter(p => p.connected);
+  if (live.some(p => !p.role)) return toast('Give every player a role first (Players tab).', 3500);
   if (!live.some(p => p.role === 'runner') || !live.some(p => p.role === 'hunter')) return toast('You need at least one runner and one hunter connected.', 3500);
   S.durMs = S.cfg.durationMin * 60000; S.endAt = Date.now() + S.durMs; S.phase = 'running'; S.winner = null;
   for (const p of S.players.values()) { p.seen = {}; if (p.role === 'runner' && p.status === 'alive') issueCode(p); }
-  broadcastState(); uiPhase(); renderBoundary(); sysChat('Match started');
+  broadcastState(); uiPhase(); renderBoundary(); sysChat('Match started'); toast('Match started.', 2500);
 }
 function newRound() {
   for (const p of S.players.values()) { p.role = p.baseRole; p.status = 'alive'; p.code = null; p.prev = null; p.out = false; p.seen = {}; }
@@ -424,26 +434,78 @@ function kick(id) {
   S.players.delete(id); pushRoster(); renderPlayers(); renderHostMarkers();
 }
 
-function renderPlayers() {
+let plistTouch = 0;
+function renderPlayers(force) {
+  if (!force && Date.now() - plistTouch < 1500) return;   // do not rebuild the list under a finger
   const box = $('#plist'); box.textContent = '';
   if (!S.players.size) { const d = el('div', 'mut'); d.textContent = 'No players yet. Share the room code or invite link.'; box.append(d); return; }
+  const admin = adminView();
   for (const p of S.players.values()) {
-    const row = el('div', 'prow' + (p.out ? ' bad' : ''));
-    const d = el('span', 'dot2 ' + p.role + (p.connected ? '' : ' off'));
-    const nm = el('span', 'pname'); nm.textContent = p.name;
+    const row = el('div', 'prow' + (admin && p.out ? ' bad' : ''));
+    const d = el('span', 'dot2 ' + (p.role || '') + (p.connected ? '' : ' off'));
+    const nm = el('span', 'pname'); nm.textContent = p.local ? 'Host (you)' : p.name;
     const meta = el('span', 'meta');
-    meta.textContent = [p.role, p.status === 'caught' ? 'caught' : '', p.out ? 'OUT OF BOUNDS' : '',
-      p.connected ? (p.pos ? 'GPS ' + ago(p.pos.ts) : 'no GPS yet') : 'offline'].filter(Boolean).join(' | ');
-    const x = el('button', 'x'); x.type = 'button'; x.textContent = 'x'; x.title = 'Remove player'; x.onclick = () => kick(p.id);
-    row.append(d, nm, x, meta); box.append(row);
+    meta.textContent = [p.role || 'no role yet', p.status === 'caught' ? 'caught' : '', admin && p.out ? 'OUT OF BOUNDS' : '',
+      p.connected ? (admin ? (p.pos ? 'GPS ' + ago(p.pos.ts) : 'no GPS yet') : 'online') : 'offline'].filter(Boolean).join(' | ');
+    const acts = el('span', 'acts');
+    const locked = S.phase !== 'lobby' && !!p.baseRole;
+    ['runner', 'hunter'].forEach(r => {
+      const b = el('button', 'rb ' + r + (p.role === r ? ' on' : '')); b.type = 'button'; b.disabled = locked;
+      b.textContent = r === 'runner' ? 'Runner' : 'Hunter'; b.dataset.act = 'role'; b.dataset.id = p.id; b.dataset.role = r;
+      acts.append(b);
+    });
+    if (!p.local) {
+      const x = el('button', 'rb x'); x.type = 'button'; x.textContent = 'x'; x.title = 'Remove player';
+      x.dataset.act = 'kick'; x.dataset.id = p.id; acts.append(x);
+    }
+    row.append(d, nm, acts, meta); box.append(row);
   }
 }
+$('#plist').addEventListener('pointerdown', () => { plistTouch = Date.now(); });
+$('#plist').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  if (b.dataset.act === 'role') assignRole(b.dataset.id, b.dataset.role);
+  else if (b.dataset.act === 'kick') kick(b.dataset.id);
+});
+function assignRole(id, role) {
+  const p = S.players.get(id); if (!p) return;
+  if (S.phase !== 'lobby' && p.baseRole) return toast('Roles are locked until the next round.');
+  p.role = role; p.baseRole = role; p.status = 'alive'; p.seen = {}; p.code = null; p.prev = null;
+  broadcast({ t: 'rolechg', id: p.id, role, status: 'alive' });
+  if (S.phase === 'running' && role === 'runner') issueCode(p);
+  pushRoster(); renderPlayers(true); renderHostMarkers();
+}
+const HM_NOTE_OBS = 'Observer sees every player live on the map. Choose Also play to get a normal player view, then set your own role in the Players tab.';
+const HM_NOTE_PLAY = 'You play like everyone else: you only see what your role allows, so the live all-players map is switched off. Set your own role in the Players tab.';
+function setHostPlays(on) {
+  if (S.phase !== 'lobby' || S.hostPlays === on) return;
+  S.hostPlays = on;
+  if (on) {
+    const conn = { open: true, send: m => setTimeout(() => clientMsg(m), 0) };   // host -> its own player view
+    S.players.set(HOSTPID, { id: HOSTPID, name: 'Host', role: null, baseRole: null, status: 'alive', conn, connected: true, pos: null,
+      out: false, code: null, prev: null, codeAt: 0, seen: {}, fails: 0, lock: 0, local: true });
+    S.conn = { open: true, send: m => hostMsg(conn, m) };                          // its player view -> host
+    S.me = { id: HOSTPID, status: 'alive' }; S.role = null; S.joined = true; S.fitted = true;
+    startGeo();
+  } else {
+    S.players.delete(HOSTPID); S.conn = null; S.role = null; S.pos = null; S.others.clear(); S.team = [];
+    if (S.watchId != null) { try { navigator.geolocation.clearWatch(S.watchId); } catch (e) {} S.watchId = null; }
+    if (accCircle) { map.removeLayer(accCircle); accCircle = null; }
+  }
+  $('#hmObs').classList.toggle('on', !on); $('#hmPlay').classList.toggle('on', on);
+  $('#hmNote').textContent = on ? HM_NOTE_PLAY : HM_NOTE_OBS;
+  applyRole(); pushRoster(); renderPlayers(true); renderHostMarkers();
+  if (on) setTab('players');
+}
+$('#hmObs').onclick = () => setHostPlays(false);
+$('#hmPlay').onclick = () => setHostPlays(true);
 function renderHostMarkers() {
+  if (!adminView()) { renderPlay(); return; }
   const items = [];
   for (const p of S.players.values()) {
     if (!p.pos) continue;
     items.push({ id: p.id, lat: p.pos.lat, lng: p.pos.lng,
-      cls: p.role + (p.out ? ' out' : '') + (p.connected ? '' : ' off'),
+      cls: (p.role || 'none') + (p.out ? ' out' : '') + (p.connected ? '' : ' off'),
       label: p.name + (p.out ? ' (OUT)' : '') + ' ' + ago(p.pos.ts) });
   }
   syncMarkers(items);
@@ -453,7 +515,7 @@ function uiPhase() {
   $('#btnStart').classList.toggle('hidden', !lobby);
   $('#btnEnd').classList.toggle('hidden', S.phase !== 'running');
   $('#btnNew').classList.toggle('hidden', S.phase !== 'ended');
-  $$('#p-setup input, #p-setup select, #dmCircle, #dmPoly, #polyUndo, #polyClear').forEach(e => e.disabled = !lobby);
+  $$('#p-setup input, #p-setup select, #hmObs, #hmPlay, #dmCircle, #dmPoly, #polyUndo, #polyClear').forEach(e => e.disabled = !lobby);
   updateHud();
 }
 
@@ -508,16 +570,16 @@ $('#btnShare').onclick = async () => {
 };
 
 /* ============================== PLAYER ============================== */
-function joinGame(name, room, role) {
-  S.mode = 'play'; S.name = name; S.room = room; S.role = role; S.joined = false;
+function joinGame(name, room) {
+  S.mode = 'play'; S.name = name; S.room = room; S.role = null; S.joined = false;
   $('#homeErr').textContent = '';
   connectToHost();
 }
 function failJoin(msg) {
   clearTimeout(S.rt);
   try { S.peer && S.peer.destroy(); } catch (e) {}
-  S.peer = null; S.conn = null; S.mode = null;
-  setView('home'); $('#homeErr').textContent = msg; $('#btnJoin').disabled = false;
+  S.peer = null; S.conn = null; S.mode = null; S.joined = false;
+  refreshBody(); $('#homeErr').textContent = msg; $('#btnJoin').disabled = false;
 }
 function scheduleReconnect() {
   clearTimeout(S.rt);
@@ -533,7 +595,7 @@ function connectToHost() {
       try { c.close(); } catch (e) {}
       if (S.joined) { setConn('lost'); scheduleReconnect(); } else failJoin('Could not reach room ' + S.room + '. Check the code and your connection.');
     }, 12000);
-    c.on('open', () => { opened = true; clearTimeout(to); tx(c, { t: 'hello', pid: S.pid, name: S.name, role: S.role }); });
+    c.on('open', () => { opened = true; clearTimeout(to); tx(c, { t: 'hello', pid: S.pid, name: S.name }); });
     c.on('data', m => { try { clientMsg(m); } catch (e) { console.error(e); } });
     c.on('close', () => { if (S.conn === c && S.mode === 'play') { setConn('lost'); if (S.joined) { banner('Connection lost. Reconnecting...'); scheduleReconnect(); } } });
     c.on('error', () => {});
@@ -555,9 +617,11 @@ function connectToHost() {
 
 function clientMsg(m) {
   if (!m || typeof m !== 'object') return;
+  if (S.mode === 'host' && (m.t === 'cfg' || m.t === 'st' || m.t === 'chat')) return;   // host already holds this state
   switch (m.t) {
     case 'welcome':
       S.joined = true; S.me = { id: m.id, status: m.status }; S.role = m.role;
+      $('#hudRoom').textContent = S.room;
       setConn('ok'); banner(null); applyRole(); applyCfg(m.cfg); applySt(m.st);
       if (!activeTab || activeTab === 'setup' || activeTab === 'players') setTab('catch');
       startGeo(); keepAwake();
@@ -578,7 +642,11 @@ function clientMsg(m) {
       toast('You were caught by ' + m.by + '. You are a hunter now.', 5000); vibrate([400, 150, 400]);
       break;
     case 'rolechg':
-      if (m.id === S.me.id) { S.role = m.role; S.me.status = m.status; S.code = null; S.others.clear(); applyRole(); renderCode(); renderPlay(); }
+      if (m.id === S.me.id) {
+        const changed = S.role !== m.role;
+        S.role = m.role; S.me.status = m.status; S.code = null; S.others.clear(); applyRole(); renderCode(); renderPlay();
+        if (changed && m.role && S.phase !== 'ended') { toast('The host made you a ' + m.role.toUpperCase() + '.', 4000); vibrate(150); }
+      }
       else { S.others.delete(m.id); renderPlay(); }
       break;
     case 'kicked': failJoin('The host removed you from this room.'); break;
@@ -615,12 +683,12 @@ function onGeo(g) {
 }
 function checkOob() {
   const b = S.cfg.boundary; let out = false;
-  if (S.mode === 'play' && b && S.phase === 'running' && S.pos) out = !inside(scaled(b, stormF()), S.pos.lat, S.pos.lng);
+  if (isPlayer() && b && S.phase === 'running' && S.pos) out = !inside(scaled(b, stormF()), S.pos.lat, S.pos.lng);
   if (out && !S.out) vibrate([300, 100, 300, 100, 300]);
   S.out = out; $('#oob').classList.toggle('hidden', !out);
 }
 function renderPlay() {
-  if (S.mode !== 'play') return;
+  if (!isPlayer()) return;
   const items = [];
   if (S.pos) items.push({ id: 'me', lat: S.pos.lat, lng: S.pos.lng, cls: 'me', label: 'You' });
   for (const o of S.others.values()) {
@@ -665,7 +733,9 @@ $('#btnCatch').onclick = () => {
 $('#chatForm').onsubmit = e => {
   e.preventDefault();
   const i = $('#chatInput'), text = i.value.trim(); if (!text) return;
-  if (S.mode === 'host') sendHostChat(text, $('#chatTarget').value); else tx(S.conn, { t: 'chat', text });
+  if (adminView()) sendHostChat(text, $('#chatTarget').value);
+  else if (!S.role) return toast('Chat opens once the host gives you a role.');
+  else tx(S.conn, { t: 'chat', text });
   i.value = '';
 };
 
@@ -688,12 +758,13 @@ setInterval(() => {
     }
     if (now - S.lastSync > 5000) { S.lastSync = now; broadcastState(); pushRoster(); }
     renderHostMarkers(); renderPlayers();
-  } else if (S.mode === 'play') {
+  }
+  if (isPlayer()) {
     if (S.pos && S.conn && S.conn.open && now - S.lastSent >= 2000) {
       S.lastSent = now;
       tx(S.conn, { t: 'pos', lat: S.pos.lat, lng: S.pos.lng, acc: S.pos.acc, age: now - S.pos.ts });
     }
-    if (S.phase === 'running' && S.cfg.storm) renderBoundary();
+    if (S.mode === 'play' && S.phase === 'running' && S.cfg.storm) renderBoundary();
     checkOob(); renderPlay(); tickCode();
   }
 }, 1000);
@@ -705,15 +776,14 @@ $('#inCode').oninput = e => { e.target.value = e.target.value.toUpperCase().repl
 $('#joinForm').onsubmit = e => {
   e.preventDefault();
   const name = $('#inName').value.replace(/[<>]/g, '').trim().slice(0, 16), room = $('#inCode').value.trim().toUpperCase();
-  const role = ($('input[name=role]:checked') || {}).value || 'runner';
   if (!name) return ($('#homeErr').textContent = 'Enter your name.');
   if (room.length !== 4) return ($('#homeErr').textContent = 'The room code has 4 characters.');
-  try { localStorage.setItem('gt_name', name); localStorage.setItem('gt_role', role); } catch (e2) {}
+  try { localStorage.setItem('gt_name', name); } catch (e2) {}
   $('#btnJoin').disabled = true; $('#homeErr').textContent = 'Connecting...';
-  joinGame(name, room, role);
+  joinGame(name, room);
 };
 $('#btnLoc').onclick = () => {
-  if (S.mode === 'host') map.locate({ setView: true, maxZoom: 17 });
+  if (S.mode === 'host' && !S.pos) map.locate({ setView: true, maxZoom: 17 });
   else if (S.pos) map.setView([S.pos.lat, S.pos.lng], Math.max(map.getZoom(), 16));
   else if (S.cfg.boundary) fitBoundary();
 };
@@ -724,13 +794,12 @@ map.on('locationerror', () => toast('Could not get your location. Allow location
 
 (function boot() {
   try {
-    const n = localStorage.getItem('gt_name'), r = localStorage.getItem('gt_role');
+    const n = localStorage.getItem('gt_name');
     if (n) $('#inName').value = n;
-    if (r) { const i = $('input[name=role][value=' + r + ']'); if (i) i.checked = true; }
   } catch (e) {}
   const room = (new URLSearchParams(location.search).get('room') || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4);
   if (room) { $('#inCode').value = room; $('#joinForm').classList.remove('hidden'); }
-  wakeUi(); setView('home');
+  wakeUi(); refreshBody();
 
   // install affordances
   let deferred = null;

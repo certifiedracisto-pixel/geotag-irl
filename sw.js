@@ -1,6 +1,6 @@
 /* GeoTag IRL service worker: offline app shell + cached libraries + light tile cache.
    deploy.sh rewrites VERSION on every deploy so phones pick up new files. */
-const VERSION = 'geotag-20261025134118';
+const VERSION = 'geotag-20261028192200';
 const SHELL = `${VERSION}-shell`;
 const LIBS = `${VERSION}-libs`;
 const TILES = 'geotag-tiles';          // kept across versions

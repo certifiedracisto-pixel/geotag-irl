@@ -33,10 +33,7 @@
     <form id="joinForm" class="hidden" autocomplete="off">
       <input id="inName" maxlength="16" placeholder="Your name" required>
       <input id="inCode" maxlength="4" placeholder="Room code" autocapitalize="characters" autocomplete="off" spellcheck="false" required class="mono">
-      <div class="seg" role="radiogroup" aria-label="Role">
-        <label><input type="radio" name="role" value="runner" checked><span>Runner</span></label>
-        <label><input type="radio" name="role" value="hunter"><span>Hunter</span></label>
-      </div>
+      <p class="fine">The host gives you your role once you are in.</p>
       <button class="btn primary big" id="btnJoin" type="submit">Join match</button>
     </form>
 
@@ -90,6 +87,13 @@
           <button id="btnShare" class="btn" type="button">Share invite link</button>
         </div>
 
+        <div class="lbl">Your part in the match</div>
+        <div class="seg2">
+          <button id="hmObs" type="button" class="on">Observer (admin)</button>
+          <button id="hmPlay" type="button">Also play</button>
+        </div>
+        <div id="hmNote" class="mut">Observer sees every player live on the map. Choose Also play to get a normal player view, then set your own role in the Players tab.</div>
+
         <div class="lbl">Play area (tap the map to draw)</div>
         <div class="seg2">
           <button id="dmCircle" type="button" class="on">Circle</button>
@@ -140,11 +144,13 @@
 
       <!-- host: players -->
       <div id="p-players" class="panel only-host hidden">
+        <div class="lbl">Give every player a role. Roles lock once the match starts.</div>
         <div id="plist" class="list"></div>
       </div>
 
       <!-- player: catch -->
       <div id="p-catch" class="panel only-play hidden">
+        <div class="only-wait mut">Waiting for the host to give you a role. You can already see the play area on the map.</div>
         <div class="only-runner">
           <div class="lbl">Your catch code. Show it only to a hunter who actually tagged you.</div>
           <div id="codeVal" class="code mono">------</div>
@@ -171,7 +177,7 @@
       <div id="p-chat" class="panel hidden">
         <div id="chatLog" class="chatlog"></div>
         <form id="chatForm" class="row" autocomplete="off">
-          <select id="chatTarget" class="only-host" aria-label="Send to">
+          <select id="chatTarget" class="only-observer" aria-label="Send to">
             <option value="all">Everyone</option>
             <option value="runner">Runners</option>
             <option value="hunter">Hunters</option>
